@@ -46,10 +46,13 @@ graph LR
 Crie um arquivo `.env` na raiz do projeto:
 
 ```env
-# Configurações do Banco de Dados
-DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/modernizer_db
+# Configurações do Banco (Docker)
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=postgres_password
+POSTGRES_DB=modernizer_db
+DATABASE_URL=postgresql+asyncpg://postgres:postgres_password@db:5432/modernizer_db
 
-# Integração LLM via OpenRouter
+# Integração LLM
 OPENROUTER_API_KEY=sua_chave_aqui
 ```
 
