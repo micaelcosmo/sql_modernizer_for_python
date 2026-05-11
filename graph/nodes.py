@@ -1,50 +1,59 @@
 import ast
+import os
+import httpx
 from typing import Any, Dict, Set
 
+from dotenv import load_dotenv
+from pydantic import BaseModel, Field
 from pglast import parser
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate
 
 from graph.state import GraphState
 
 
+load_dotenv()
+
+
+class ModernizedCode(BaseModel):
+    """Contrato de saida estruturada para o LLM via OpenRouter."""
+    codigo_python: str = Field(description="O codigo Python 3.14 gerado.")
+    justificativa_arquitetural: str = Field(description="Explicacao tecnica.")
+    dependencias: list[str] = Field(description="Bibliotecas necessarias.")
+
+
 def _traverse_and_extract(node: Any, markers: Dict[str, Set[str]]) -> None:
-    """
-    Percorre recursivamente a AST gerada pelo pglast para identificar riscos.
-    """
+    """Detecta complexidades como cursores e recursividade para o prompt."""
     if isinstance(node, dict):
-        if "withClause" in node and node.get("withClause") is not None:
-            if node["withClause"].get("recursive"):
-                markers["risks"].add("CTE_RECURSIVA")
-
-        if "RaiseStmt" in node:
-            markers["risks"].add("RAISE_EXCEPTION")
-
-        if "DeclareCursorStmt" in node or "ViewStmt" in node:
+        if "withClause" in node and node.get("withClause", {}).get("recursive"):
+            markers["risks"].add("CTE_RECURSIVA")
+        if "DeclareCursorStmt" in node:
             markers["risks"].add("CURSOR_EXPLICITO")
-            
         for key, value in node.items():
             if isinstance(value, str) and value.upper() == "JSONB":
                 markers["risks"].add("TIPO_JSONB")
             _traverse_and_extract(value, markers)
-            
     elif isinstance(node, (list, tuple)):
         for item in node:
             _traverse_and_extract(item, markers)
-    elif hasattr(node, "__dict__"):
-        _traverse_and_extract(vars(node), markers)
+
+
+def _sanitize_python_code(raw_code: str) -> str:
+    """Remove delimitadores de markdown e garante a limpeza do codigo."""
+    code = raw_code.replace("```python", "").replace("```", "").strip()
+    # Remove linhas vazias no inicio que podem quebrar a indentacao global
+    lines = code.splitlines()
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    return "\n".join(lines)
 
 
 def node_parsing(state: GraphState) -> Dict[str, Any]:
-    """
-    Converte o SQL bruto em uma AST utilizando pglast.
-    """
+    """Etapa de parsing usando pglast para validar SQL legado."""
     try:
         raw_ast = parser.parse_sql(state["sql_code"])
-        
-        # Serializacao simples para manter compatibilidade com o TypedDict
-        parsed_representation = {"raw_structure": str(raw_ast)}
-        
         return {
-            "parsed_ast": parsed_representation,
+            "parsed_ast": {"raw": str(raw_ast)},
             "report": {**state.get("report", {}), "parsing": "concluido"},
             "status": "em_processamento"
         }
@@ -56,95 +65,91 @@ def node_parsing(state: GraphState) -> Dict[str, Any]:
 
 
 def node_analysis(state: GraphState) -> Dict[str, Any]:
-    """
-    Identifica construcoes relevantes e pontos de risco na AST e no SQL bruto.
-    """
+    """Identifica riscos transacionais e semanticos antes da geracao."""
     if state.get("status") == "falha":
         return {}
-        
-    markers: Dict[str, Set[str]] = {
-        "params": set(),
-        "risks": set()
-    }
     
-    ast_obj = state.get("parsed_ast")
+    markers = {"risks": set()}
+    _traverse_and_extract(state.get("parsed_ast"), markers)
     
-    if ast_obj:
-        _traverse_and_extract(ast_obj, markers)
-        
-    sql_upper = state.get("sql_code", "").upper()
-    
-    # Fallback estrutural para capturar sintaxes dentro do bloco DO/BEGIN
-    if "TRANSACTION" in sql_upper or "COMMIT" in sql_upper or "ROLLBACK" in sql_upper:
-        markers["risks"].add("TRANSACAO_EXPLICITA")
-    if "FOR UPDATE" in sql_upper:
+    if "FOR UPDATE" in state["sql_code"].upper():
         markers["risks"].add("LOCK_FOR_UPDATE")
-    if "RETURN QUERY" in sql_upper:
-        markers["risks"].add("RETURN_QUERY")
-    if "EXCEPTION" in sql_upper:
-        markers["risks"].add("TRATAMENTO_EXCECAO")
-    if "LOOP" in sql_upper or "WHILE" in sql_upper:
-        markers["risks"].add("LOOP_DETECTADO")
-    if "CURSOR" in sql_upper:
-        markers["risks"].add("CURSOR_EXPLICITO")
         
-    num_risks = len(markers["risks"])
-    complexity = "baixa"
-    if num_risks >= 4:
-        complexity = "muito_alta"
-    elif num_risks >= 2:
-        complexity = "alta"
-    elif num_risks == 1:
-        complexity = "media"
-        
-    serializable_markers = {
-        "params": list(markers["params"]),
-        "risks": list(markers["risks"]),
-        "complexity": complexity
-    }
-    
     return {
-        "semantic_markers": serializable_markers,
-        "report": {
-            **state.get("report", {}), 
-            "analise_semantica": "concluido", 
-            "riscos_encontrados": serializable_markers["risks"],
-            "complexidade_estimada": complexity
-        }
+        "semantic_markers": {"risks": list(markers["risks"])},
+        "report": {**state.get("report", {}), "analise": "concluido"}
     }
 
 
 def node_generation(state: GraphState) -> Dict[str, Any]:
-    """
-    Utiliza LLM para traduzir a logica para Python 3.14.
-    """
+    """Gera o codigo Python via OpenRouter com rigor de indentacao."""
     if state.get("status") == "falha":
         return {}
-        
-    python_code = "# Gerado via pipeline\ndef modern_function():\n    pass\n"
     
-    return {
-        "generated_python": python_code,
-        "report": {**state.get("report", {}), "geracao_llm": "concluido"}
-    }
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    
+    try:
+        client = httpx.Client(trust_env=False, timeout=60.0)
+        
+        llm = ChatOpenAI(
+            model="deepseek/deepseek-chat",
+            openai_api_key=api_key,
+            base_url="https://openrouter.ai/api/v1",
+            http_client=client,
+            temperature=0.1
+        )
+        
+        system_msg = (
+            "Voce e um Arquiteto de Software Senior especialista em Python 3.14. "
+            "Sua tarefa e converter PL/pgSQL para Python moderno usando SQLAlchemy 2.0. "
+            "REGRAS OBRIGATORIAS:\n"
+            "1. Use 4 espacos para indentacao.\n"
+            "2. Nunca deixe um bloco (def, try, except, with, if) vazio.\n"
+            "3. Garanta que o codigo seja sintaticamente valido.\n"
+            "4. Nao inclua explicacoes fora do campo justificativa_arquitetural."
+        )
+
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", system_msg),
+            ("human", "SQL Legado:\n{sql}\n\nRiscos Semanticos:\n{risks}")
+        ])
+
+        structured_llm = llm.with_structured_output(ModernizedCode)
+        response = structured_llm.invoke(prompt.format(
+            sql=state["sql_code"],
+            risks=state.get("semantic_markers", {})
+        ))
+
+        return {
+            "generated_python": _sanitize_python_code(response.codigo_python),
+            "report": {
+                **state.get("report", {}), 
+                "geracao": "concluido",
+                "justificativa": response.justificativa_arquitetural
+            }
+        }
+    except Exception as e:
+        return {
+            "errors": state.get("errors", []) + [f"Erro na Geracao LLM: {str(e)}"],
+            "status": "falha"
+        }
 
 
 def node_validation(state: GraphState) -> Dict[str, Any]:
-    """
-    Verifica a validade sintatica do Python gerado.
-    """
+    """Valida se o Python gerado e sintaticamente correto."""
     if state.get("status") == "falha":
         return {}
-        
-    code = state.get("generated_python", "")
+    
     try:
-        ast.parse(code)
+        ast.parse(state["generated_python"])
         return {
-            "status": "sucesso",
-            "report": {**state.get("report", {}), "validacao_estatica": "concluido"}
+            "status": "sucesso", 
+            "report": {**state.get("report", {}), "validacao": "concluido"}
         }
-    except SyntaxError as e:
+    except Exception as e:
+        # Retorna o erro de indentacao ou sintaxe para o reporte
         return {
-            "status": "falha",
-            "errors": state.get("errors", []) + [f"Erro sintatico no Python: {str(e)}"]
+            "status": "falha", 
+            "errors": state.get("errors", []) + [f"Erro Sintatico: {str(e)}"],
+            "generated_python": state["generated_python"]
         }

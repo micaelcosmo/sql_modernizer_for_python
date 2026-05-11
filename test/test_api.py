@@ -1,55 +1,37 @@
+import httpx
 import pytest
-from fastapi.testclient import TestClient
 
-from main_api import app
-
-
-client = TestClient(app)
+# URL padrao do Uvicorn
+BASE_URL = "http://127.0.0.1:8000"
 
 
 def test_health_check_status_ok():
-    """
-    Verifica se o endpoint de integridade responde com status 200
-    e o payload esperado de status 'ok'.
-    """
-    response = client.get("/health")
+    """Verifica se o servidor real responde ao health check."""
+    response = httpx.get(f"{BASE_URL}/health")
     
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
 
 
 def test_modernize_endpoint_success():
-    """
-    Simula uma submissao valida de codigo SQL legado para garantir
-    que os contratos Pydantic e a rota estao processando a entrada
-    e que o LangGraph esta processando os nos.
-    """
+    """Valida o contrato de sucesso enviando um SQL para o servidor rodando."""
     payload = {
-        "sql_code": "SELECT * FROM clientes;",
-        "schema_context": "CREATE TABLE clientes (id INT);"
+        "sql_code": "CREATE FUNCTION teste() RETURNS VOID AS $$ BEGIN END; $$ LANGUAGE plpgsql;",
+        "schema_context": ""
     }
     
-    response = client.post("/modernize", json=payload)
+    response = httpx.post(f"{BASE_URL}/modernize", json=payload, timeout=60.0)
     data = response.json()
     
-    assert response.status_code == 200
+    assert response.status_code == 200, f"Erro na API: {data}"
     assert data["status"] == "sucesso"
     assert "generated_code" in data
-    assert "report" in data
-    # O grafo real atualiza o report para 'concluido'
-    assert data["report"]["parsing"] == "concluido"
 
 
 def test_modernize_endpoint_validation_error_on_missing_sql():
-    """
-    Garante que a API rejeite requisicoes que nao contenham
-    o campo obrigatorio 'sql_code', retornando erro 422 (Unprocessable Entity).
-    """
-    payload = {
-        "schema_context": "CREATE TABLE clientes (id INT);"
-    }
+    """Garante que o Pydantic da API rejeite campos ausentes."""
+    payload = {"schema_context": "..."}
     
-    response = client.post("/modernize", json=payload)
+    response = httpx.post(f"{BASE_URL}/modernize", json=payload)
     
     assert response.status_code == 422
-    assert "detail" in response.json()

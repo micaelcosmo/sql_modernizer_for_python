@@ -13,18 +13,15 @@ from database.models import ModernizationHistory
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Gerencia o ciclo de vida da aplicacao.
-    Cria as tabelas no banco de dados se elas nao existirem ao iniciar a API.
-    """
+    """Inicia o banco de dados e garante a limpeza de conexoes no Windows."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     yield
+    await engine.dispose()
 
 
 app = FastAPI(
-    title="Modernization Pipeline API",
-    description="API Gateway Híbrido para modernização de rotinas legadas via LangGraph.",
+    title="Modernizer Pipeline",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -32,9 +29,7 @@ app = FastAPI(
 
 @app.get("/health")
 async def health_check() -> Dict[str, str]:
-    """
-    Endpoint de verificação de integridade do serviço exigido pelo desafio.
-    """
+    """Rota de integridade para validacao do desafio."""
     return {"status": "ok"}
 
 
@@ -43,49 +38,48 @@ async def modernize_procedure(
     request: ModernizeRequest, 
     db: AsyncSession = Depends(get_db)
 ) -> ModernizeResponse:
-    """
-    Recebe a stored procedure, aciona o LangGraph e persiste o resultado no PostgreSQL.
-    """
-    initial_state: GraphState = {
+    """Orquestra a modernizacao e garante a propagacao de erros do Grafo."""
+    state: GraphState = {
         "sql_code": request.sql_code,
         "schema_context": request.schema_context,
-        "parsed_ast": None,
-        "semantic_markers": None,
-        "generated_python": None,
         "report": {},
         "errors": [],
         "status": "iniciando"
     }
 
     try:
-        # Execucao do Grafo
-        final_state = app_graph.invoke(initial_state)
+        # Chamada assincrona nativa para estabilidade
+        final_state = await app_graph.ainvoke(state)
         
-        # Persistencia Obrigatoria
-        history_entry = ModernizationHistory(
+        # Consolida o relatorio injetando os erros capturados nos nos
+        report_final = final_state.get("report", {})
+        if final_state.get("errors"):
+            report_final["detalhes_erro"] = final_state.get("errors")
+
+        history = ModernizationHistory(
             source_code=request.sql_code,
             generated_code=final_state.get("generated_python"),
-            report=final_state.get("report", {}),
+            report=report_final,
             status=final_state.get("status", "falha")
         )
         
-        db.add(history_entry)
+        db.add(history)
         await db.commit()
 
+        # Mapeamento explicito para evitar 'None' no Pydantic
         return ModernizeResponse(
             status=final_state.get("status", "falha"),
-            generated_code=final_state.get("generated_python"),
-            report=final_state.get("report", {})
+            generated_code=final_state.get("generated_python") or "",
+            report=report_final
         )
 
     except Exception as e:
-        # Garante que falhas criticas tambem sejam logadas
-        error_history = ModernizationHistory(
-            source_code=request.sql_code,
-            report={"error": str(e)},
-            status="falha"
+        await db.rollback()
+        # Fallback de seguranca para o endpoint nao retornar 500 puro
+        return ModernizeResponse(
+            status="falha",
+            generated_code="",
+            report={"erro_critico": str(e)}
         )
-        db.add(error_history)
-        await db.commit()
-        
-        raise HTTPException(status_code=500, detail=f"Erro na pipeline: {str(e)}")
+    finally:
+        await db.close()
