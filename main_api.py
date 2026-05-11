@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from typing import Dict
 
 from fastapi import FastAPI, HTTPException, Depends
@@ -10,20 +11,23 @@ from database.database import get_db, engine, Base
 from database.models import ModernizationHistory
 
 
-app = FastAPI(
-    title="Modernization Pipeline API",
-    description="API Gateway Híbrido para modernização de rotinas legadas via LangGraph.",
-    version="1.0.0"
-)
-
-
-@app.on_event("startup")
-async def startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     """
+    Gerencia o ciclo de vida da aplicacao.
     Cria as tabelas no banco de dados se elas nao existirem ao iniciar a API.
     """
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    yield
+
+
+app = FastAPI(
+    title="Modernization Pipeline API",
+    description="API Gateway Híbrido para modernização de rotinas legadas via LangGraph.",
+    version="1.0.0",
+    lifespan=lifespan
+)
 
 
 @app.get("/health")

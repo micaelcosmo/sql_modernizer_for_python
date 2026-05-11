@@ -21,7 +21,8 @@ def test_health_check_status_ok():
 def test_modernize_endpoint_success():
     """
     Simula uma submissao valida de codigo SQL legado para garantir
-    que os contratos Pydantic e a rota estao processando a entrada.
+    que os contratos Pydantic e a rota estao processando a entrada
+    e que o LangGraph esta processando os nos.
     """
     payload = {
         "sql_code": "SELECT * FROM clientes;",
@@ -35,7 +36,8 @@ def test_modernize_endpoint_success():
     assert data["status"] == "sucesso"
     assert "generated_code" in data
     assert "report" in data
-    assert data["report"]["parsing"] == "pendente_implementacao"
+    # O grafo real atualiza o report para 'concluido'
+    assert data["report"]["parsing"] == "concluido"
 
 
 def test_modernize_endpoint_validation_error_on_missing_sql():

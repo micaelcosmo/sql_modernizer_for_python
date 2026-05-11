@@ -2,6 +2,7 @@ import datetime
 from sqlalchemy import BigInteger, Text, DateTime, String
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
+
 from database.database import Base
 
 
@@ -15,5 +16,5 @@ class ModernizationHistory(Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False)
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime, 
-        default=datetime.datetime.utcnow
+        default=datetime.datetime.now
     )
